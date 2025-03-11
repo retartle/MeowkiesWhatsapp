@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
 import requests
 import json
 import os
 import logging
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 # Configure logging
 logging.basicConfig(
@@ -35,7 +36,7 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini
 
 # --- Meow Aesthetic Clinic Bot Context ---
 MEOWKIES_CONTEXT = """
-You are Meowkies, the official customer support assistant for Meow Aesthetic Clinic, a medical aesthetic clinic founded by Dr. Meow.
+You are Meowkies, the official customer support assistant for Meow Aesthetic Clinic, a medical aesthetic clinic founded by Dr. Meow. You operate as a WhatsApp chatbot, communicating with customers through WhatsApp messages.
 
 Key information about Meow Aesthetic Clinic:
 - Located at Woods Square Tower 1, #05-62 S737715
@@ -59,7 +60,7 @@ Key information about Meow Aesthetic Clinic:
 
 As Meowkies, always:
 - Be professional yet friendly and warm in your tone
-- Use occasional cat-themed puns when appropriate, but don't overdo it (limit to one pun per message)
+- Include one cat-themed pun in EVERY response (examples: "purr-fect", "right meow", "paw-sitive", "fur-tunate", "claw-some", "fur-get")
 - Prioritize customer satisfaction and helpfulness
 - Provide clear, concise information about services, pricing, and policies
 - Avoid making specific promises about treatment results
@@ -68,27 +69,129 @@ As Meowkies, always:
 - Emphasize our clinic's medical credentials and evidence-based approach
 - Be knowledgeable about the differences between medical aesthetic clinics and beauty spas/salons
 - Emphasize our commitment to medical ethics and scientifically-backed treatments
-- Sign off with "Purr-fectly yours, Meowkies 🐾" when concluding a conversation (When the customer says bye, not every message)
+- ONLY add the signature "Purr-fectly yours, Meowkies 🐾" when the customer is ending the conversation (such as saying goodbye, thank you, or indicating they are finished chatting)
 
-If you don't know something specific or if the customer has a detailed medical question, suggest they contact the clinic directly at 87713358 to speak with our staff or schedule a consultation with Dr. Meow. Always be helpful but remember you cannot diagnose conditions or recommend specific treatments without a proper consultation.
+Since you operate on WhatsApp, use WhatsApp formatting when appropriate:
+- Use *bold text* (surround with asterisks) for important information like clinic hours, location, or key points
+- Use _italic text_ (surround with underscores) for emphasis or highlighting services
+- Use ~strikethrough~ (surround with tildes) when needed
+- Use ```code blocks``` (surround with triple backticks) for structured information like price lists
+- Use emojis strategically to make messages more engaging (🐱, ✨, 🏥, 🧴, 💉, 💆‍♀️)
+- Format lists with proper bullets or numbers when presenting multiple options
+- Break up long messages into clear paragraphs for better readability on mobile devices
+- Use line breaks to separate different topics within the same message
 """
 
+# --- In-memory conversation storage ---
+conversations = {}
+
+# Define how long conversations should be kept in memory (in hours)
+CONVERSATION_TIMEOUT = 24  # hours
+
+# --- Rate limiting settings ---
+RATE_LIMIT_WINDOW = 60  # seconds
+MAX_MESSAGES_PER_WINDOW = 5
+rate_limits = {}  # Structure: { "customer_number": [datetime1, datetime2, ...] }
+
+def check_rate_limit(customer_number):
+    """Returns True if within allowed rate limit; otherwise, False."""
+    current_time = datetime.now()
+    # Initialize list if not exists
+    if customer_number not in rate_limits:
+        rate_limits[customer_number] = []
+    # Remove timestamps older than the window
+    rate_limits[customer_number] = [
+        timestamp for timestamp in rate_limits[customer_number]
+        if (current_time - timestamp).total_seconds() <= RATE_LIMIT_WINDOW
+    ]
+    if len(rate_limits[customer_number]) >= MAX_MESSAGES_PER_WINDOW:
+        return False
+    # Log this message timestamp
+    rate_limits[customer_number].append(current_time)
+    return True
+
+# --- Conversation management functions ---
+def add_message_to_conversation(customer_number, role, content):
+    """Add a message to the conversation history for a given customer"""
+    current_time = datetime.now()
+    
+    # Create new conversation entry if needed
+    if customer_number not in conversations:
+        conversations[customer_number] = {
+            "history": [],
+            "last_updated": current_time
+        }
+    
+    # Update existing conversation
+    conversations[customer_number]["history"].append({
+        "role": role,
+        "content": content
+    })
+    conversations[customer_number]["last_updated"] = current_time
+    
+    logger.debug(f"Added {role} message to conversation with {customer_number}. History length: {len(conversations[customer_number]['history'])}")
+
+def get_conversation_history(customer_number, max_messages=10):
+    """Get the recent conversation history for a customer"""
+    if customer_number not in conversations:
+        return []
+    if is_conversation_expired(customer_number):
+        logger.info(f"Conversation with {customer_number} has expired. Starting new conversation.")
+        conversations[customer_number] = {
+            "history": [],
+            "last_updated": datetime.now()
+        }
+        return []
+    history = conversations[customer_number]["history"]
+    return history[-max_messages:] if len(history) > max_messages else history
+
+def is_conversation_expired(customer_number):
+    """Check if a conversation has expired based on timeout period"""
+    if customer_number not in conversations:
+        return True
+    last_updated = conversations[customer_number]["last_updated"]
+    expiration_time = last_updated + timedelta(hours=CONVERSATION_TIMEOUT)
+    return datetime.now() > expiration_time
+
+def cleanup_expired_conversations():
+    """Remove expired conversations to free up memory"""
+    expired_numbers = []
+    for number in conversations:
+        if is_conversation_expired(number):
+            expired_numbers.append(number)
+    for number in expired_numbers:
+        del conversations[number]
+    if expired_numbers:
+        logger.info(f"Cleaned up {len(expired_numbers)} expired conversations")
+
 # --- Gemini API interaction ---
-def get_gemini_response(message):
+def get_gemini_response(customer_number, message):
     try:
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": GEMINI_API_KEY
         }
         
-        # Create the full prompt with context
-        contextual_prompt = f"{MEOWKIES_CONTEXT}\n\nCustomer message: {message}\n\nYour response as Meowkies:"
+        add_message_to_conversation(customer_number, "user", message)
+        conversation_history = get_conversation_history(customer_number)
         
         data = {
-            "contents": [{"parts": [{"text": contextual_prompt}]}]
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": MEOWKIES_CONTEXT + "\n\nPlease respond as Meowkies based on the following conversation:"}]
+                }
+            ]
         }
         
-        logger.debug(f"Sending request to Gemini API with Meowkies context. Customer message: {message[:50]}...")
+        for entry in conversation_history:
+            role = "user" if entry["role"] == "user" else "model"
+            data["contents"].append({
+                "role": role,
+                "parts": [{"text": entry["content"]}]
+            })
+        
+        logger.debug(f"Sending request to Gemini API with conversation history. Customer message: {message[:50]}...")
         response = requests.post(GEMINI_API_URL, headers=headers, json=data, timeout=30)
         
         if response.status_code != 200:
@@ -97,7 +200,17 @@ def get_gemini_response(message):
         
         response_data = response.json()
         logger.debug(f"Gemini API response received: {str(response_data)[:100]}...")
-        return response_data
+        
+        if "candidates" in response_data and response_data["candidates"]:
+            candidate = response_data["candidates"][0]
+            if "content" in candidate and "parts" in candidate["content"] and candidate["content"]["parts"]:
+                response_text = candidate["content"]["parts"][0]["text"]
+                add_message_to_conversation(customer_number, "assistant", response_text)
+                return {"text": response_text}
+        
+        error_msg = "Failed to extract response from Gemini API"
+        logger.error(error_msg)
+        return {"error": error_msg}
     except requests.exceptions.RequestException as e:
         logger.error(f"Request to Gemini API failed: {str(e)}")
         return {"error": f"Request to Gemini API failed: {str(e)}"}
@@ -148,9 +261,7 @@ def extract_message_data(data):
             logger.warning("Webhook data is empty or not a dictionary")
             return None, None
         
-        # Check for Meta's challenge response
         if "object" in data and data.get("object") == "whatsapp_business_account":
-            # Process entry array
             if "entry" not in data or not data["entry"]:
                 logger.warning("No entries in webhook data")
                 return None, None
@@ -189,6 +300,9 @@ def webhook():
         try:
             logger.debug(f"Received webhook POST: {request.data.decode('utf-8')[:200]}...")
             
+            # Periodically clean up expired conversations
+            cleanup_expired_conversations()
+            
             # Parse JSON data
             try:
                 data = request.get_json()
@@ -204,40 +318,38 @@ def webhook():
             
             logger.info(f"Processing message from {customer_number}: {customer_message}")
             
-            # Get response from Gemini
-            gemini_response = get_gemini_response(customer_message)
+            # Check rate limiting
+            if not check_rate_limit(customer_number):
+                warning_message = ("Whoa there, fur-get about spamming! "
+                                   "You're sending messages too quickly. Please slow down and try again in a minute.")
+                logger.warning(f"Rate limit exceeded for {customer_number}. Sending warning message.")
+                send_whatsapp_message(customer_number, warning_message)
+                return jsonify({"status": "error", "message": "Rate limit exceeded"}), 200
             
-            # Check for errors in Gemini response
+            # Get response from Gemini with conversation history
+            gemini_response = get_gemini_response(customer_number, customer_message)
+            
             if "error" in gemini_response:
                 error_message = gemini_response["error"]
                 logger.error(f"Error getting Gemini response: {error_message}")
-                
-                # Send error message to user (optional)
-                fallback_message = "I'm having trouble processing your request right meow. Please try again later or call our clinic directly at 87713358 during our operating hours (Mon-Fri: 11am-8pm, Sat: 11am-10pm). Purr-fectly yours, Meowkies 🐾"
+                fallback_message = ("I'm having trouble processing your request right meow. "
+                                    "Please try again later or call our clinic directly at 87713358 during our operating hours (Mon-Fri: 11am-8pm, Sat: 11am-10pm). "
+                                    "Purr-fectly yours, Meowkies 🐾")
                 send_whatsapp_message(customer_number, fallback_message)
-                
+                add_message_to_conversation(customer_number, "assistant", fallback_message)
                 return jsonify({"status": "error", "message": error_message}), 200
             
-            # Extract text from Gemini response
-            try:
-                if "candidates" in gemini_response and gemini_response["candidates"]:
-                    candidate = gemini_response["candidates"][0]
-                    if "content" in candidate and "parts" in candidate["content"] and candidate["content"]["parts"]:
-                        gemini_text_response = candidate["content"]["parts"][0]["text"]
-                    else:
-                        logger.error(f"Invalid Gemini response structure: {gemini_response}")
-                        gemini_text_response = "I apologize for the inconvenience, but I'm having trouble responding to your message right meow. Please try again later or contact our clinic directly at 87713358 during our operating hours (Mon-Fri: 11am-8pm, Sat: 11am-10pm). Purr-fectly yours, Meowkies 🐾"
-                else:
-                    logger.error(f"No candidates in Gemini response: {gemini_response}")
-                    gemini_text_response = "I apologize for the inconvenience, but I'm having trouble responding to your message right meow. Please try again later or contact our clinic directly at 87713358 during our operating hours (Mon-Fri: 11am-8pm, Sat: 11am-10pm). Purr-fectly yours, Meowkies 🐾"
-            except Exception as e:
-                logger.error(f"Error extracting text from Gemini response: {str(e)}")
-                gemini_text_response = "I apologize for the inconvenience, but I'm having trouble responding to your message right meow. Please try again later or contact our clinic directly at 87713358 during our operating hours (Mon-Fri: 11am-8pm, Sat: 11am-10pm). Purr-fectly yours, Meowkies 🐾"
+            gemini_text_response = gemini_response.get("text", "")
+            if not gemini_text_response:
+                logger.error("Empty response text from Gemini")
+                fallback_message = ("I apologize for the inconvenience, but I'm having trouble responding to your message right meow. "
+                                    "Please try again later or contact our clinic directly at 87713358 during our operating hours (Mon-Fri: 11am-8pm, Sat: 11am-10pm). "
+                                    "Purr-fectly yours, Meowkies 🐾")
+                send_whatsapp_message(customer_number, fallback_message)
+                add_message_to_conversation(customer_number, "assistant", fallback_message)
+                return jsonify({"status": "error", "message": "Empty response from Gemini"}), 200
             
-            # Send response via WhatsApp
             whatsapp_result = send_whatsapp_message(customer_number, gemini_text_response)
-            
-            # Check for errors in WhatsApp API response
             if "error" in whatsapp_result:
                 error_message = whatsapp_result["error"]
                 logger.error(f"Error sending WhatsApp message: {error_message}")
@@ -252,11 +364,10 @@ def webhook():
     
     elif request.method == "GET":
         try:
-            # Webhook verification
             verify_token = request.args.get("hub.verify_token")
             challenge = request.args.get("hub.challenge")
             
-            logger.info(f"Received webhook verification request with token: {verify_token[:3]}...")
+            logger.info(f"Received webhook verification request with token: {verify_token[:3]}..." if verify_token else "Missing verify_token")
             
             if not verify_token or not challenge:
                 logger.warning("Missing verify_token or challenge in verification request")
@@ -275,14 +386,38 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Simple endpoint to check if the service is running"""
     return jsonify({
         "status": "healthy",
         "whatsapp_configured": bool(WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_API_TOKEN),
         "gemini_configured": bool(GEMINI_API_KEY),
-        "bot_identity": "Meowkies - Meow Aesthetic Clinic Customer Support"
+        "bot_identity": "Meowkies - Meow Aesthetic Clinic Customer Support",
+        "active_conversations": len(conversations)
     })
+
+@app.route("/conversations", methods=["GET"])
+def conversation_stats():
+    stats = {
+        "total_conversations": len(conversations),
+        "conversations": {}
+    }
+    
+    for number, data in conversations.items():
+        stats["conversations"][number] = {
+            "message_count": len(data["history"]),
+            "last_updated": data["last_updated"].isoformat(),
+            "expired": is_conversation_expired(number)
+        }
+    
+    return jsonify(stats)
+
+@app.route("/reset/<phone_number>", methods=["POST"])
+def reset_conversation(phone_number):
+    if phone_number in conversations:
+        del conversations[phone_number]
+        return jsonify({"status": "success", "message": f"Conversation for {phone_number} reset"})
+    else:
+        return jsonify({"status": "error", "message": "Conversation not found"}), 404
 
 if __name__ == "__main__":
     logger.info("Starting Meowkies WhatsApp Customer Support for Meow Aesthetic Clinic")
-    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(debug=True, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))   
