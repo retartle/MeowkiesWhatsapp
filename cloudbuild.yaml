@@ -1,0 +1,11 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/myimage', '.']
+
+images:
+  - 'gcr.io/$PROJECT_ID/myimage'
+
+options:
+  default_logs_bucket_behavior: REGIONAL_USER_OWNED_BUCKET
+logging: GCS_ONLY
+logBucket: "projects/meowkies-support-wa/buckets/meowkies-build-logs-asia-southeast1"
