@@ -419,5 +419,5 @@ def reset_conversation(phone_number):
         return jsonify({"status": "error", "message": "Conversation not found"}), 404
 
 if __name__ == "__main__":
-    logger.info("Starting Meowkies WhatsApp Customer Support for Meow Aesthetic Clinic")
+    logger.info("Starting Meowkies WhatsApp Customer Support for Meowkies")
     app.run(debug=False, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
