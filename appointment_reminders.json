@@ -1,0 +1,34 @@
+{
+    "reminders": [
+        {
+            "appointment_id": "test_123",
+            "customer_name": "Test Customer",
+            "customer_number": "your_actual_phone_number",
+            "treatment_type": "medical_facial",
+            "appointment_time": "2025-03-30T00:20:16.462407+08:00",
+            "send_time": "2025-03-29T23:20:16.462407+08:00",
+            "sent": false,
+            "created_at": "2025-03-29T23:10:16.462407+08:00"
+        },
+        {
+            "appointment_id": "test_123",
+            "customer_name": "Test Customer",
+            "customer_number": "your_actual_phone_number",
+            "treatment_type": "medical_facial",
+            "appointment_time": "2025-03-30T00:22:46.480727+08:00",
+            "send_time": "2025-03-29T23:22:46.480727+08:00",
+            "sent": false,
+            "created_at": "2025-03-29T23:12:46.480727+08:00"
+        },
+        {
+            "appointment_id": "test_123",
+            "customer_name": "Test Customer",
+            "customer_number": "your_actual_phone_number",
+            "treatment_type": "medical_facial",
+            "appointment_time": "2025-03-30T01:11:26.981577+08:00",
+            "send_time": "2025-03-30T00:11:26.981577+08:00",
+            "sent": false,
+            "created_at": "2025-03-30T00:01:26.981577+08:00"
+        }
+    ]
+}
